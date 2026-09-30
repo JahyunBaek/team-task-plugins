@@ -1,0 +1,16 @@
+{
+  "description": "작업 기록 파일이 예약 없이 만들어지면 경고한다. 발급은 /task-new 가 하고, 이 훅은 커맨드를 거치지 않은 경우만 잡는 안전망이다.",
+  "hooks": {
+    "PostToolUse": [
+      {
+        "matcher": "Write|Edit",
+        "hooks": [
+          {
+            "type": "command",
+            "command": "node \"${CLAUDE_PLUGIN_ROOT}/hooks/guard.js\""
+          }
+        ]
+      }
+    ]
+  }
+}
