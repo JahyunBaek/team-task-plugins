@@ -1,6 +1,6 @@
 {
   "name": "task-id",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "작업 기록 번호를 원격에 예약해서 발급한다. 목록을 훑어 고르는 방식과 달리, 여러 세션이나 여러 PC가 같은 번호를 동시에 잡을 수 없다.",
   "keywords": ["task", "id", "worktree", "concurrency", "git"],
   "author": { "name": "JahyunBaek", "url": "https://github.com/JahyunBaek" },

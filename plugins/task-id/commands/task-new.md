@@ -15,8 +15,10 @@ argument-hint: <도메인> <이름>
 
 2. 결과는 JSON 한 줄이다.
    - `ok: true` — `id` 가 발급된 번호다. 이 번호로만 파일을 만든다.
-   - `ok: true` 이면서 `offline: true` — 원격을 못 봤다. `warning` 을 사용자에게 **그대로 전달**하고 진행한다.
-   - `ok: false` — `error` 를 사용자에게 알리고 멈춘다. 번호를 임의로 정해서 진행하지 않는다.
+   - `ok: false` 이면서 `offline: true` — 원격을 못 봐서 멈춘 것이다. `error` 를 **그대로 전달**한다.
+     VPN·git 인증 문제일 가능성이 높다. 번호를 임의로 정해서 진행하지 않는다.
+   - `ok: false` — `error` 를 사용자에게 알리고 멈춘다.
+   - `ok: true` 이면서 `offline: true` — `offlinePolicy` 를 `warn` 으로 둔 저장소다. `warning` 을 그대로 전달하고 진행한다.
 
 3. `path` 가 있으면 그 경로에 파일을 만든다. 없으면 발급된 `id` 로 파일명을 짓는다.
 

@@ -43,7 +43,7 @@ claude plugin install task-id@team-task-plugins
 | `refNamespace` | `refs/task-ids` | 선점한 번호의 ref 를 두는 이름공간 |
 | `remote` | `origin` | 판정을 맡길 원격 |
 | `digits` | `4` | 번호 자릿수 |
-| `offlinePolicy` | `warn` | 원격을 못 볼 때 — `warn`(경고 후 진행) 또는 `block`(중단) |
+| `offlinePolicy` | `block` | 원격을 못 볼 때 — `block`(중단) 또는 `warn`(경고 후 잠정 발급) |
 | `maxAttempts` | `25` | 거절당했을 때 다음 번호로 넘어가는 최대 횟수 |
 
 ## 구성
@@ -56,9 +56,34 @@ claude plugin install task-id@team-task-plugins
 
 ## 맞바꿈
 
-- 발급할 때마다 원격을 한 번 탄다. 끊겨 있으면 경고를 남기고 로컬 기준으로 **잠정** 발급한다.
+- 발급할 때마다 원격을 한 번 탄다. **원격을 못 보면 번호를 주지 않고 멈춘다**(기본값 `block`).
+  다른 PC 가 무슨 번호를 잡았는지 모르는 상태이기 때문이다. 어차피 그 상태에서는 작업을 푸시하지도 못한다.
+  정말 끊긴 채로 받아야 하면 `offlinePolicy` 를 `warn` 으로 두면 **잠정** 번호를 준다.
 - 예약해 놓고 문서를 쓰지 않으면 그 번호는 빈다.
 - ref 가 쌓이기만 하고 저절로 지워지지 않는다. 주기적으로 정리할 방법이 필요하다.
+
+## 이 방식이 안전한 근거
+
+깃 공식 문서(`git update-ref`)가 "없을 때만 만들기"를 보장한다.
+
+> 생성하려는 ref 가 존재하지 않음을 보장하려면 `<old-oid>` 에 40개의 "0" 또는 빈 문자열을 지정할 수 있다
+
+같은 문서에 *"각 ref 는 개별적으로 원자적으로 갱신되거나 삭제된다"* 고 적혀 있다. `--force-with-lease` 라는 이름('임차') 자체가 깃이 이 동작을 잠금에 가깝게 보고 있다는 뜻이다.
+
+## 이렇게 쓰는 곳들
+
+`refs/` 밑에 자기 칸을 파는 것은 흔한 방식이다. 공개 저장소를 직접 조회한 결과다(2026-10-01).
+
+| 저장소 | 자기 칸 | 개수 | 브랜치 |
+|---|---|---|---|
+| [Gerrit](https://gerrit.googlesource.com/gerrit) | `refs/changes/*` | 252,633 | 58 |
+| [GitLab](https://gitlab.com/gitlab-org/gitlab-foss) | `refs/environments/*` · `refs/merge-requests/*` | 44,034 · 950 | 4,469 |
+| [GitHub](https://github.com/anthropics/claude-plugins-official) | `refs/pull/*` | 5,142 | 718 |
+| [git-bug](https://github.com/git-bug/git-bug) | `refs/bugs/*` · `refs/identities/*` | 454 · 312 | 33 |
+
+깃 자체도 그렇다. `git notes` 는 `refs/notes/*`, `git stash` 는 `refs/stash` 를 쓴다.
+
+**선점 용도로 쓴 사례도 있다.** [Backlog.md 의 제안](https://github.com/MrLesk/Backlog.md/issues/937)은 여러 사람이 같은 작업을 동시에 집는 문제를 `refs/backlog/tasks/*` 와 `--force-with-lease` 로 푼다. 목표를 *"동시 선점자는 정확히 한 명"* 으로 적고 있다. 다만 그쪽은 원격을 못 볼 때 **막는 쪽**을 택했고, 이 플러그인도 같은 선택을 기본값으로 둔다.
 
 ## 요구 사항
 

@@ -24,7 +24,7 @@ const DEFAULTS = {
   refNamespace: 'refs/task-ids',
   remote: 'origin',
   digits: 4,
-  offlinePolicy: 'warn',
+  offlinePolicy: 'block',
   maxAttempts: 25,
 };
 
@@ -145,7 +145,11 @@ function main() {
   }
 
   if (offline && cfg.offlinePolicy === 'block') {
-    fail('원격을 볼 수 없어 발급을 멈췄습니다: ' + offlineReason, { offline: true });
+    fail('원격을 볼 수 없어 발급을 멈췄습니다(' + offlineReason + '). ' +
+         '다른 PC 가 어떤 번호를 잡았는지 알 수 없는 상태라 번호를 주지 않습니다. ' +
+         'VPN 과 git 인증을 확인한 뒤 다시 부르세요. ' +
+         '정말 끊긴 채로 받아야 하면 .task-id.json 에 {"offlinePolicy":"warn"} 을 두면 잠정 번호를 줍니다.',
+         { offline: true });
   }
 
   let n = 0;
