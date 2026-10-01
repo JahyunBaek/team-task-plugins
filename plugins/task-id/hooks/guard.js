@@ -5,18 +5,19 @@
  *
  * 발급은 /task-new 가 한다. 이 훅은 그걸 거치지 않았거나, 거쳤어도 어긋난 경우를 알린다.
  *   1. 폴더 이름과 번호의 도메인이 다르다
- *   2. 같은 번호의 다른 문서가 이미 있다 (이 트리 · 형제 워크트리 · 원격 기준 브랜치)
- *   3. /task-new 로 받은 번호가 아니다
+ *   2. 같은 번호의 다른 문서가 이미 있다 (이 트리 · 형제 워크트리)
+ *   3. /task-new 로 받은 번호가 아니다 - 원격에 이미 등록된 번호면 다른 세션·PC 의 번호라고 알린다
  *
+ * 원격은 브랜치 대신 ref(번호 등록부)를 본다. 작업 기록은 대부분 기능 브랜치에서 만들어져서
+ * 브랜치 하나만 봐서는 겹친 것을 못 찾는다.
  * 저장소가 이미 아는 파일(옛 문서 수정)은 건드리지 않는다.
  * 출력은 짧게 둔다. 훅 출력도 대화 문맥에 쌓인다.
  */
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
-const { resolveBranch, committedPaths } = require('../scripts/branch.js');
 
-const DEFAULTS = { taskDir: 'docs/tasks', remote: 'origin', defaultBranch: null };
+const DEFAULTS = { taskDir: 'docs/tasks', remote: 'origin', refNamespace: 'refs/task-ids' };
 
 function git(args, cwd, timeout) {
   return execFileSync('git', args,
@@ -81,36 +82,40 @@ function worktreeRoots(root) {
   return [...roots];
 }
 
-/**
- * 같은 번호를 쓰는 다른 문서의 이름들.
- * 원격은 짧게 가져와 보고, 실패하면 마지막으로 가져온 기준으로 본다. 훅이 작업을 막아선 안 된다.
- */
+/** 이 PC 의 작업 트리와 형제 워크트리에서 같은 번호를 쓰는 다른 문서의 이름들. */
 function sameNumberElsewhere(info, stem, root, cfg) {
   const prefix = info.id + '-';
   const found = new Set();
-  const consider = name => {
-    const s = name.replace(/\.md$/, '');
-    if (s !== stem && (s === info.id || s.indexOf(prefix) === 0)) found.add(s);
-  };
-
   for (const r of worktreeRoots(root)) {
-    try { for (const f of fs.readdirSync(path.join(r, cfg.taskDir, info.domain))) consider(f); }
-    catch (e) { /* 그 트리에는 이 도메인 폴더가 없다 */ }
-  }
-
-  const base = committedPaths(cfg, cfg.remote, [], root, 8000);
-  if (base.ok) {
-    for (const p of base.paths) consider(path.basename(p));
-  } else {
-    // 원격에 못 닿으면 마지막으로 가져온 추적 브랜치로 본다.
-    const picked = resolveBranch(cfg, cfg.remote, [], root, 3000);
-    if (picked.branch) {
-      const ref = 'refs/remotes/' + cfg.remote + '/' + picked.branch.replace(/^refs\/heads\//, '');
-      const out = gitTry(['ls-tree', '-r', '--name-only', ref, '--', cfg.taskDir + '/' + info.domain], root, 8000);
-      if (out) for (const p of out.split('\n')) if (p.trim()) consider(path.basename(p.trim()));
-    }
+    try {
+      for (const f of fs.readdirSync(path.join(r, cfg.taskDir, info.domain))) {
+        const s = f.replace(/\.md$/, '');
+        if (s !== stem && (s === info.id || s.indexOf(prefix) === 0)) found.add(s);
+      }
+    } catch (e) { /* 그 트리에는 이 도메인 폴더가 없다 */ }
   }
   return [...found].sort();
+}
+
+/**
+ * 원격 번호 등록부에 이 번호가 있나 - ref 가 있거나 바닥 표시 아래면 있다.
+ * 원격에 못 닿으면 null. 훅이 작업을 막아선 안 되니 짧게 묻고 넘어간다.
+ */
+function remoteRegistered(info, root, cfg) {
+  const ns = cfg.refNamespace.replace(/\/+$/, '');
+  const head = 'TASK-' + info.year + '-' + info.domain + '-';
+  const out = gitTry(['ls-remote', cfg.remote, ns + '/' + info.id, ns + '/_floor/' + head + '*'], root, 5000);
+  if (out === null) return null;
+  const num = parseInt(info.num, 10);
+  for (const line of out.split('\n')) {
+    const at = line.indexOf('\t');
+    if (at < 0) continue;
+    const name = line.slice(at + 1).trim();
+    if (name === ns + '/' + info.id) return true;
+    const n = parseInt(name.slice(name.lastIndexOf('-') + 1), 10);
+    if (!isNaN(n) && num <= n) return true;
+  }
+  return false;
 }
 
 function main() {
@@ -158,9 +163,14 @@ function main() {
     msgs.push('[task-id] ' + info.id + ' 는 이미 있습니다 - ' + shown + '\n' +
               '          번호를 /task-new 로 다시 받으세요.');
   } else if (claimedIds(root).indexOf(info.id) < 0) {
-    msgs.push('[task-id] ' + info.id + ' 를 선점하지 않고 새 작업 기록을 만들었습니다.\n' +
-              '          목록을 보고 고른 번호라면 다른 세션이 같은 번호를 쓰고 있을 수 있습니다.\n' +
-              '          번호는 /task-new 로 받으세요.');
+    if (remoteRegistered(info, root, cfg) === true) {
+      msgs.push('[task-id] ' + info.id + ' 는 원격에 이미 등록된 번호입니다.\n' +
+                '          다른 세션이나 PC 가 받은 번호일 수 있습니다. 번호를 /task-new 로 다시 받으세요.');
+    } else {
+      msgs.push('[task-id] ' + info.id + ' 를 선점하지 않고 새 작업 기록을 만들었습니다.\n' +
+                '          목록을 보고 고른 번호라면 다른 세션이 같은 번호를 쓰고 있을 수 있습니다.\n' +
+                '          번호는 /task-new 로 받으세요.');
+    }
   }
 
   if (msgs.length) console.log(msgs.join('\n'));
