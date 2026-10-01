@@ -17,6 +17,7 @@
 const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { committedPaths, arg } = require('./branch.js');
 
 const DEFAULTS = {
   taskDir: 'docs/tasks',
@@ -80,67 +81,6 @@ function parseFileName(name) {
   return { year: year, domain: dom.join('-'), num: num, key: year + '/' + dom.join('-') };
 }
 
-function arg(argv, name, dflt) {
-  const at = argv.indexOf(name);
-  return at >= 0 && argv[at + 1] ? argv[at + 1] : dflt;
-}
-
-/**
- * 어느 브랜치에 커밋된 것을 '영구히 쓰인 번호' 로 볼지 정한다.
- *
- * 코드커밋은 HEAD 의 symref 를 알려주지 않는다(깃허브는 알려준다). 그래서 여러 경로로 찾는다.
- * 못 찾으면 멈춘다 - 엉뚱한 브랜치를 보면 아직 안 쓰인 번호를 쓰인 것으로 오해할 수 있다.
- *
- * 일하는 브랜치가 기본 브랜치와 다르면(예: main 은 배포용, 실제 작업은 dev)
- * .task-id.json 에 defaultBranch 로 못박는 게 맞다.
- */
-function resolveBranch(cfg, remote, argv) {
-  const asRef = b => (b.indexOf('refs/') === 0 ? b : 'refs/heads/' + b);
-
-  const given = arg(argv, '--branch', null);
-  if (given) return { branch: asRef(given), from: '--branch 인자' };
-  if (cfg.defaultBranch) return { branch: asRef(cfg.defaultBranch), from: '.task-id.json 의 defaultBranch' };
-
-  const sym = gitQuiet(['ls-remote', '--symref', remote, 'HEAD'], { timeout: 20000 });
-  if (sym.ok) {
-    for (const line of sym.out.split('\n')) {
-      if (line.indexOf('ref:') === 0) {
-        const t = line.slice(4).trim().split(/\s+/)[0];
-        if (t) return { branch: t, from: '원격이 알려준 HEAD' };
-      }
-    }
-  }
-
-  const head = 'refs/remotes/' + remote + '/';
-  const local = gitQuiet(['symbolic-ref', head + 'HEAD']);
-  if (local.ok) {
-    const t = local.out.trim();
-    if (t.indexOf(head) === 0) {
-      return { branch: 'refs/heads/' + t.slice(head.length), from: '로컬에 적힌 ' + remote + '/HEAD' };
-    }
-  }
-
-  // 원격 HEAD 해시와 똑같은 브랜치가 딱 하나면 그것으로 본다.
-  const h = gitQuiet(['ls-remote', remote, 'HEAD'], { timeout: 20000 });
-  const heads = gitQuiet(['ls-remote', '--heads', remote], { timeout: 20000 });
-  if (h.ok && heads.ok) {
-    const sha = (h.out.split('\n')[0] || '').split('\t')[0].trim();
-    const hit = [];
-    for (const line of heads.out.split('\n')) {
-      const at = line.indexOf('\t');
-      if (at < 0) continue;
-      if (line.slice(0, at).trim() === sha) hit.push(line.slice(at + 1).trim());
-    }
-    if (hit.length === 1) return { branch: hit[0], from: 'HEAD 해시와 일치하는 브랜치' };
-  }
-
-  return {
-    branch: null,
-    error: '어느 브랜치를 기준으로 삼을지 정하지 못했습니다. ' +
-           '.task-id.json 에 defaultBranch 를 적거나 --branch 로 주세요. ' +
-           '(코드커밋은 기본 브랜치를 알려주지 않습니다.)',
-  };
-}
 
 function main() {
   const argv = process.argv.slice(2);
@@ -196,19 +136,15 @@ function main() {
   }
 
   // 2. 기준 브랜치에 커밋된 작업 기록 파일
-  const picked = resolveBranch(cfg, remote, argv);
-  const branch = picked.branch;
-  if (!branch) fail(picked.error);
-  const fetched = gitQuiet(['fetch', '--quiet', remote, branch], { timeout: 180000 });
-  if (!fetched.ok) fail('기준 브랜치(' + branch + ')를 가져오지 못했습니다: ' + fetched.out.trim().split('\n').pop());
-  const tree = gitQuiet(['ls-tree', '-r', '--name-only', 'FETCH_HEAD', '--', cfg.taskDir], { timeout: 60000 });
-  if (!tree.ok) fail('기준 브랜치의 파일 목록을 읽지 못했습니다: ' + tree.out.trim().split('\n').pop());
+  const base = committedPaths(cfg, remote, argv, root, 180000);
+  if (!base.ok) fail(base.error);
+  const branch = base.branch;
+  const picked = { from: base.from };
 
   const committed = new Set();
   const maxCommitted = new Map();
-  for (const p of tree.out.split('\n')) {
-    if (!p.trim()) continue;
-    const info = parseFileName(path.basename(p.trim()));
+  for (const p of base.paths) {
+    const info = parseFileName(path.basename(p));
     if (!info) continue;
     committed.add(info.key + '#' + info.num);
     const cur = maxCommitted.get(info.key);

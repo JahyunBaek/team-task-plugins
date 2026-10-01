@@ -1,5 +1,5 @@
 ---
-description: 작업 번호를 원격에 예약해서 발급받는다 (동시 발급 충돌 방지)
+description: 작업 번호를 원격에서 선점해서 발급받는다 (동시 발급 충돌 방지)
 argument-hint: <도메인> <이름>
 ---
 
@@ -17,6 +17,8 @@ argument-hint: <도메인> <이름>
    - `ok: true` — `id` 가 발급된 번호다. 이 번호로만 파일을 만든다.
    - `ok: false` 이면서 `offline: true` — 원격을 못 봐서 멈춘 것이다. `error` 를 **그대로 전달**한다.
      VPN·git 인증 문제일 가능성이 높다. 번호를 임의로 정해서 진행하지 않는다.
+   - `ok: false` 이면서 `error` 에 "기준 브랜치" 가 들어 있음 — 저장소 루트 `.task-id.json` 에 `defaultBranch` 가 필요하다.
+     작업이 어느 브랜치에 쌓이는지 **사용자에게 묻고**, 답을 받아 적은 뒤 다시 부른다. 추측해서 적지 않는다.
    - `ok: false` — `error` 를 사용자에게 알리고 멈춘다.
    - `ok: true` 이면서 `offline: true` — `offlinePolicy` 를 `warn` 으로 둔 저장소다. `warning` 을 그대로 전달하고 진행한다.
 

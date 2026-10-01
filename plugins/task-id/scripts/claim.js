@@ -12,11 +12,20 @@
  * 메시지에 번호·프로세스·시각·난수를 적어 매번 다른 객체가 되게 한다 -
  * 같은 객체면 "방금 내가 잡은 것"과 "이미 있던 것"을 구별할 수 없기 때문이다.
  *
- * 원격을 못 보면 경고를 남기고 로컬 기준으로 발급한다(잠정).
+ * 후보 번호는 네 곳에서 본 최대값 + 1 이다.
+ *   1. 이 작업 트리의 작업 기록 파일
+ *   2. 형제 워크트리의 작업 기록 파일 (아직 커밋 전인 것까지)
+ *   3. 원격의 선점 ref 와 바닥 표시
+ *   4. 원격 기준 브랜치에 커밋된 작업 기록 파일
+ * 4 가 없으면, 체크아웃이 뒤처져 있을 때 ref 없이 만들어진 문서(플러그인 이전 문서 등)의
+ * 번호를 다시 고를 수 있다.
+ *
+ * 원격을 못 보면 멈춘다(기본값). offlinePolicy 가 warn 이면 1·2 만으로 잠정 번호를 준다.
  */
-const { execFileSync } = require('child_process');
 const fs = require('fs');
 const path = require('path');
+const { execFileSync } = require('child_process');
+const { committedPaths } = require('./branch.js');
 
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 const DEFAULTS = {
@@ -26,6 +35,7 @@ const DEFAULTS = {
   digits: 4,
   offlinePolicy: 'block',
   maxAttempts: 25,
+  defaultBranch: null,
 };
 
 function git(args, opts) {
@@ -156,6 +166,18 @@ function main() {
          { offline: true });
   }
 
+  // 원격 기준 브랜치에 커밋된 문서. 선점 ref 가 없는 번호(플러그인 이전 문서, 손으로 만든 문서)의
+  // 최종 근거는 이것뿐이다. 못 보면 번호를 주지 않는다 - 겹칠 수 있는 번호를 주느니 멈춘다.
+  let base = null;
+  if (!offline) {
+    base = committedPaths(cfg, cfg.remote, [], root);
+    if (!base.ok) fail(base.error + ' 원격에 이미 커밋된 번호를 확인해야 해서 발급을 멈췄습니다.');
+    for (const p of base.paths) {
+      const n = numberAfter(path.basename(p), prefix);
+      if (n >= 0) used.push(n);
+    }
+  }
+
   let n = 0;
   for (const u of used) if (u > n) n = u;
   n += 1;
@@ -165,7 +187,7 @@ function main() {
     console.log(JSON.stringify(Object.assign({
       ok: true, id: id, attempts: attempts, domain: domain, year: year,
       path: slug ? cfg.taskDir + '/' + domain + '/' + id + '-' + slug + '.md' : null,
-      scanned: { worktrees: worktrees.length, remote: !offline },
+      scanned: { worktrees: worktrees.length, remote: !offline, branch: base ? base.branch : null },
     }, extra || {})));
   };
 
