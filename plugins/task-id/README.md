@@ -21,6 +21,8 @@ claude plugin marketplace add https://github.com/JahyunBaek/team-task-plugins
 claude plugin install task-id@team-task-plugins
 ```
 
+깃허브가 아닌 git 호스트에 올렸다면 **주소 끝에 `.git` 을 붙인다.** 안 붙이면 CLI 가 git 저장소가 아니라 JSON 파일 주소로 보고 HTTP 로 받으려 한다. AWS 코드커밋 주소가 그렇다 — `.../v1/repos/<이름>` 그대로 넣으면 `HTTP 401 error while downloading marketplace` 로 실패하고, `.../v1/repos/<이름>.git` 으로 넣으면 clone 으로 받는다.
+
 ## 쓰는 법
 
 ```
