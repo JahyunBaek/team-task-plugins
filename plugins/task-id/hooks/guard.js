@@ -11,7 +11,8 @@
  * 원격은 브랜치 대신 ref(번호 등록부)를 본다. 작업 기록은 대부분 기능 브랜치에서 만들어져서
  * 브랜치 하나만 봐서는 겹친 것을 못 찾는다.
  * 저장소가 이미 아는 파일(옛 문서 수정)은 건드리지 않는다.
- * 출력은 짧게 둔다. 훅 출력도 대화 문맥에 쌓인다.
+ * 경고는 JSON(additionalContext · systemMessage)으로 낸다 - 종료 코드 0 의 표준 출력은 Claude 에게 가지 않는다.
+ * 출력은 짧게 둔다. 경고도 대화 문맥에 쌓인다.
  */
 const fs = require('fs');
 const path = require('path');
@@ -173,7 +174,15 @@ function main() {
     }
   }
 
-  if (msgs.length) console.log(msgs.join('\n'));
+  if (msgs.length) {
+    // PostToolUse 훅이 종료 코드 0 으로 낸 표준 출력은 디버그 로그에만 남는다 - Claude 도 사람도 못 본다.
+    // 그래서 JSON 으로 낸다. additionalContext 는 도구 결과 옆에서 Claude 가 보고, systemMessage 는 화면에 뜬다.
+    const text = msgs.join('\n');
+    console.log(JSON.stringify({
+      hookSpecificOutput: { hookEventName: 'PostToolUse', additionalContext: text },
+      systemMessage: text,
+    }));
+  }
 }
 
 main();
