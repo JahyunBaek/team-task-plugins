@@ -126,7 +126,11 @@ function main() {
 
   let offline = false;
   let offlineReason = '';
-  const ls = gitQuiet(['ls-remote', cfg.remote, cfg.refNamespace + '/' + prefix + '*'], { timeout: 10000 });
+  // 선점 ref 와 함께 바닥 표시(_floor)도 읽는다. 정리로 ref 를 지운 뒤에는 바닥 표시만
+  // 남는데, 그것까지 봐야 뒤처진 체크아웃이 이미 쓰인 번호를 다시 집지 않는다.
+  const ls = gitQuiet(['ls-remote', cfg.remote,
+    cfg.refNamespace + '/' + prefix + '*',
+    cfg.refNamespace + '/_floor/' + prefix + '*'], { timeout: 10000 });
   if (ls.ok) {
     for (const line of ls.out.split('\n')) {
       const at = line.indexOf(prefix);

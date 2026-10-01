@@ -24,8 +24,11 @@ const DEFAULTS = {
   remote: 'origin',
   pruneKeep: 20,
   defaultBranch: null,
+  digits: 4,
 };
 const BATCH = 100;
+const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
+const FLOOR = '_floor';
 
 function git(args, opts) {
   opts = opts || {};
@@ -161,7 +164,9 @@ function main() {
   const ls = gitQuiet(['ls-remote', remote, cfg.refNamespace + '/*'], { timeout: 30000 });
   if (!ls.ok) fail('원격의 ref 목록을 보지 못했습니다: ' + ls.out.trim().split('\n').pop());
   const head = cfg.refNamespace + '/';
+  const floorHead = head + FLOOR + '/';
   const refs = [];
+  const floors = new Map();   // key -> { num, ref }
   let bytes = 0;
   for (const line of ls.out.split('\n')) {
     if (!line.trim()) continue;
@@ -169,6 +174,14 @@ function main() {
     const at = line.indexOf('\t');
     if (at < 0) continue;
     const name = line.slice(at + 1).trim();
+    if (name.indexOf(floorHead) === 0) {
+      const f = parseId(name.slice(floorHead.length));
+      if (f) {
+        const cur = floors.get(f.key);
+        if (!cur || f.num > cur.num) floors.set(f.key, { num: f.num, ref: name });
+      }
+      continue;
+    }
     if (name.indexOf(head) !== 0) continue;
     const info = parseId(name.slice(head.length));
     if (!info) continue;
@@ -233,16 +246,61 @@ function main() {
     return;
   }
 
-  // 4. 삭제 - 한 번에 BATCH 개씩. git 은 한 push 안의 ref 를 각각 원자적으로 처리한다.
-  let deleted = 0;
+  // 4. 바닥 표시를 먼저 세운다.
+  //
+  // ref 를 지우면 그 번호가 쓰였다는 근거가 원격에서 사라진다. 뒤처진 체크아웃은
+  // 자기 파일 목록만 보고 번호를 정하므로, 이미 쓰인 번호를 다시 받을 수 있다.
+  // 그래서 그룹마다 "여기까지는 이미 쓰였다"를 ref 이름에 적어 하나 남긴다.
+  // 발급 쪽은 이 번호도 함께 보고 그 위에서 시작한다.
+  //
+  // 순서가 중요하다. 세우기 전에 지우면 그 사이가 빈다.
   const failures = [];
-  for (let i = 0; i < deletable.length; i += BATCH) {
-    const chunk = deletable.slice(i, i + BATCH);
-    const res = gitQuiet(['push', remote, '--delete'].concat(chunk.map(r => r.ref)), { timeout: 120000 });
+  const groups = new Map();
+  for (const r of deletable) {
+    if (!groups.has(r.info.key)) groups.set(r.info.key, []);
+    groups.get(r.info.key).push(r);
+  }
+
+  const pad = n => String(n).padStart(cfg.digits, '0');
+  const floorsSet = [];
+  const ready = [];
+  for (const [key, list] of groups.entries()) {
+    const [year, domain] = key.split('/');
+    const top = maxCommitted.get(key);
+    const was = floors.has(key) ? floors.get(key).num : -1;
+    const want = Math.max(top, was);
+    const name = head + FLOOR + '/TASK-' + year + '-' + domain + '-' + pad(want);
+
+    if (want > was) {
+      const made = gitQuiet(['commit-tree', EMPTY_TREE],
+        { input: 'floor TASK-' + year + '-' + domain + ' <= ' + pad(want) + '\n' });
+      if (!made.ok) { failures.push(key + ': 바닥 표시 객체를 만들지 못했습니다'); continue; }
+      const put = gitQuiet(['push', '--force', remote, made.out.trim() + ':' + name], { timeout: 60000 });
+      if (!put.ok) {
+        failures.push(key + ': 바닥 표시를 세우지 못해 지우지 않았습니다 - ' +
+                      (put.out.trim().split('\n').filter(Boolean).pop() || ''));
+        continue;
+      }
+      floorsSet.push({ group: key, floor: want, was: was < 0 ? null : was });
+    }
+    ready.push({ key: key, list: list, oldFloor: (was >= 0 && want > was) ? floors.get(key).ref : null });
+  }
+
+  // 5. 삭제 - 한 번에 BATCH 개씩. git 은 한 push 안의 ref 를 각각 원자적으로 처리한다.
+  let deleted = 0;
+  const doomed = [];
+  for (const g of ready) {
+    for (const r of g.list) doomed.push(r.ref);
+    if (g.oldFloor) doomed.push(g.oldFloor);
+  }
+  for (let i = 0; i < doomed.length; i += BATCH) {
+    const chunk = doomed.slice(i, i + BATCH);
+    const res = gitQuiet(['push', remote, '--delete'].concat(chunk), { timeout: 180000 });
     if (res.ok) deleted += chunk.length;
     else failures.push(res.out.trim().split('\n').filter(Boolean).pop() || '알 수 없는 오류');
   }
   summary.deleted = deleted;
+  summary.floorsSet = floorsSet;
   if (failures.length) summary.failures = failures.slice(0, 3);
   console.log(JSON.stringify(summary));
 }
