@@ -122,18 +122,24 @@ function main() {
   if (!info) return;
 
   const cwd = payload.cwd || process.cwd();
-  if (alreadyTracked(file, cwd)) return;
+  const abs = path.resolve(cwd, String(file));
 
-  const top = gitTry(['rev-parse', '--show-toplevel'], cwd);
+  // 저장소는 세션 폴더가 아니라 파일 위치로 찾는다. 세션은 주 저장소에 있고 파일은 워크트리
+  // (.claude/worktrees/...) 안이거나, 다른 저장소의 파일을 고칠 때 세션 폴더로 찾으면 경로가
+  // 작업 기록 폴더로 시작하지 않아 조용히 통과했다.
+  let dir = path.dirname(abs);
+  while (!fs.existsSync(dir) && path.dirname(dir) !== dir) dir = path.dirname(dir);
+  const top = gitTry(['rev-parse', '--show-toplevel'], dir);
   if (!top) return;
-  const root = top.trim();
+  const root = path.resolve(top.trim());
+  if (alreadyTracked(abs, root)) return;
 
   const cfg = Object.assign({}, DEFAULTS);
   try { Object.assign(cfg, JSON.parse(fs.readFileSync(path.join(root, '.task-id.json'), 'utf8'))); }
   catch (e) { /* 설정 파일이 없으면 기본값 */ }
 
   // 작업 기록 폴더 밖이면 판단하지 않는다.
-  const rel = path.relative(root, path.resolve(cwd, String(file))).split(path.sep).join('/');
+  const rel = path.relative(root, abs).split(path.sep).join('/');
   const taskDir = cfg.taskDir.replace(/\/+$/, '') + '/';
   if (rel.indexOf(taskDir) !== 0) return;
   const folder = rel.slice(taskDir.length).split('/')[0];
@@ -151,7 +157,7 @@ function main() {
     const shown = dupes.slice(0, 2).join(', ') + (dupes.length > 2 ? ' 외 ' + (dupes.length - 2) + '건' : '');
     msgs.push('[task-id] ' + info.id + ' 는 이미 있습니다 - ' + shown + '\n' +
               '          번호를 /task-new 로 다시 받으세요.');
-  } else if (claimedIds(cwd).indexOf(info.id) < 0) {
+  } else if (claimedIds(root).indexOf(info.id) < 0) {
     msgs.push('[task-id] ' + info.id + ' 를 선점하지 않고 새 작업 기록을 만들었습니다.\n' +
               '          목록을 보고 고른 번호라면 다른 세션이 같은 번호를 쓰고 있을 수 있습니다.\n' +
               '          번호는 /task-new 로 받으세요.');
