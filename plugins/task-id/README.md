@@ -63,6 +63,17 @@ claude plugin marketplace add https://github.com/JahyunBaek/team-task-plugins
 claude plugin install task-id@team-task-plugins
 ```
 
+**자동 업데이트** — Anthropic 공식이 아닌 마켓플레이스는 자동 업데이트가 기본으로 꺼져 있다. 저장소 `.claude/settings.json` 의 `extraKnownMarketplaces` 항목에 `"autoUpdate": true` 를 두면(`/plugin` → Marketplaces → Enable auto-update 가 쓰는 자리와 같다) 세션에서 첫 메시지 뒤 최대 10분 안에 새 판을 받는다. 적용은 `/reload-plugins` 나 다음 실행 — 재시작은 필요 없다. 새 판은 `plugin.json` 의 `version` 으로 알아보므로 배포할 때마다 버전을 올린다.
+
+```json
+"extraKnownMarketplaces": {
+  "team-task-plugins": {
+    "source": { "source": "git", "url": "<저장소 주소>.git" },
+    "autoUpdate": true
+  }
+}
+```
+
 깃허브가 아닌 git 호스트에 올렸다면 **주소 끝에 `.git` 을 붙인다.** 안 붙이면 CLI 가 git 저장소가 아니라 JSON 파일 주소로 보고 HTTP 로 받으려 한다. AWS 코드커밋 주소가 그렇다 — `.../v1/repos/<이름>` 그대로 넣으면 `HTTP 401 error while downloading marketplace` 로 실패하고, `.../v1/repos/<이름>.git` 으로 넣으면 clone 으로 받는다.
 
 ## 쓰는 법
