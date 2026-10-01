@@ -92,23 +92,118 @@ function siblingWorktrees(root) {
     .filter(p => p && path.resolve(p) !== path.resolve(root));
 }
 
-/** 발급한 번호를 저장소에 적어 둔다. 훅이 이 목록을 보고 예약 없는 파일을 잡는다. */
-function recordClaim(id, provisional) {
-  const g = gitQuiet(['rev-parse', '--git-dir']);
-  if (!g.ok) return;
-  const file = path.join(g.out.trim(), 'task-id-claims.json');
-  let list = [];
-  try { list = JSON.parse(fs.readFileSync(file, 'utf8')); } catch (e) { list = []; }
-  if (!Array.isArray(list)) list = [];
-  list.push({ id: id, at: new Date().toISOString(), provisional: !!provisional });
+/**
+ * 발급한 번호를 저장소에 적어 둔다. 훅이 이 목록을 보고 선점 없이 만든 파일을 잡는다.
+ * 워크트리끼리 함께 쓰는 자리(--git-common-dir)에 둔다 - 주 트리에서 받은 번호로
+ * 워크트리에서 파일을 만들어도 훅이 같은 목록을 본다.
+ */
+function claimsFile() {
+  const g = gitQuiet(['rev-parse', '--git-common-dir']);
+  return g.ok ? path.resolve(process.cwd(), g.out.trim(), 'task-id-claims.json') : null;
+}
+function readClaims() {
+  const file = claimsFile();
+  if (!file) return [];
+  try { const list = JSON.parse(fs.readFileSync(file, 'utf8')); return Array.isArray(list) ? list : []; }
+  catch (e) { return []; }
+}
+function recordClaim(id, provisional, extra) {
+  const file = claimsFile();
+  if (!file) return;
+  const list = readClaims();
+  list.push(Object.assign({ id: id, at: new Date().toISOString(), provisional: !!provisional }, extra || {}));
   try { fs.writeFileSync(file, JSON.stringify(list, null, 2)); } catch (e) { /* 기록 실패가 발급을 막지는 않는다 */ }
 }
 
+/** TASK-<연도>-<도메인>-<번호> 를 뜯는다. 아니면 null. */
+function parseIdStr(id) {
+  const parts = String(id).split('-');
+  if (parts.length < 4 || parts[0] !== 'TASK') return null;
+  const year = parts[1];
+  const numTxt = parts[parts.length - 1];
+  const domain = parts.slice(2, parts.length - 1).join('-');
+  if (year.length !== 4 || isNaN(Number(year)) || !domain || !numTxt.length || isNaN(Number(numTxt))) return null;
+  return { year: year, domain: domain, num: parseInt(numTxt, 10), prefix: 'TASK-' + year + '-' + domain + '-' };
+}
+
+/** 이름이 정확히 그 번호인 문서들(뒤에 설명이 붙은 것 포함). */
+function namesWithNumber(names, prefix, num) {
+  return names.filter(n => numberAfter(n, prefix) === num);
+}
+
+/**
+ * --adopt <번호> : 플러그인을 붙이기 전부터 쓰고 있던 번호를 ref 로 등록한다.
+ *
+ * 커밋 전인 문서는 다른 PC 에서 안 보이고 ref 도 없다. 그대로 두면 다른 PC 가 같은 번호를 받는다.
+ * 이 PC 의 작업 트리에 그 번호의 문서가 있을 때만 등록한다. 기준 브랜치에 같은 번호의
+ * 다른 문서가 있으면 이미 겹친 것이라 멈춘다.
+ */
+function adopt(id, cfg, root, branchArgv) {
+  const p = parseIdStr(id);
+  if (!p) fail('번호 형식이 아닙니다: ' + id + ' (예: TASK-2026-core-0042)');
+  const canon = p.prefix + String(p.num).padStart(cfg.digits, '0');
+
+  const local = [];
+  for (const base of [root].concat(siblingWorktrees(root))) {
+    const d = path.join(base, cfg.taskDir, p.domain);
+    try { for (const f of fs.readdirSync(d)) local.push(f); } catch (e) { /* 그 트리에는 이 도메인이 없다 */ }
+  }
+  const mine = namesWithNumber(local, p.prefix, p.num);
+  if (!mine.length) fail('이 PC 의 작업 트리에 ' + canon + ' 문서가 없습니다. 등록은 이미 쓰고 있는 번호에만 합니다.');
+
+  const base = committedPaths(cfg, cfg.remote, branchArgv, root);
+  if (!base.ok) fail(base.error);
+  const theirs = namesWithNumber(base.paths.map(x => path.basename(x)), p.prefix, p.num);
+  if (theirs.length) {
+    const clash = mine.filter(n => theirs.indexOf(n) < 0);
+    if (clash.length) {
+      fail(canon + ' 는 기준 브랜치에 다른 문서로 이미 있습니다 - ' + theirs.join(', ') +
+           '. 이쪽 문서(' + clash.join(', ') + ')의 번호를 /task-new 로 다시 받으세요.', { id: canon });
+    }
+    console.log(JSON.stringify({ ok: true, id: canon, adopted: false,
+      message: '이미 기준 브랜치에 커밋된 번호라 등록할 필요가 없습니다.' }));
+    return;
+  }
+
+  const ref = cfg.refNamespace + '/' + canon;
+  const msg = 'adopt ' + canon + ' pid=' + process.pid + ' t=' + Date.now() +
+              ' r=' + Math.random().toString(36).slice(2) + '\n';
+  const made = gitQuiet(['commit-tree', EMPTY_TREE], { input: msg });
+  if (!made.ok) fail('등록용 객체를 만들지 못했습니다: ' + made.out.trim());
+  const push = gitQuiet(['push', '--force-with-lease=' + ref + ':', cfg.remote, made.out.trim() + ':' + ref], { timeout: 15000 });
+  if (!push.ok) {
+    const why = push.out.toLowerCase();
+    const taken = why.indexOf('rejected') >= 0 || why.indexOf('stale info') >= 0 ||
+                  why.indexOf('already exists') >= 0 || why.indexOf('non-fast-forward') >= 0;
+    if (!taken) fail('등록에 실패했습니다: ' + (push.out.trim().split('\n').filter(Boolean).pop() || ''), { id: canon });
+    const ours = readClaims().some(c => c && c.id === canon);
+    if (ours) {
+      console.log(JSON.stringify({ ok: true, id: canon, adopted: false, message: '이미 이 PC 에서 등록한 번호입니다.' }));
+      return;
+    }
+    fail(canon + ' 는 원격에 이미 선점돼 있습니다. 다른 PC 나 세션이 같은 번호를 잡은 것입니다. ' +
+         '이쪽 문서(' + mine.join(', ') + ')의 번호를 /task-new 로 다시 받으세요.', { id: canon });
+  }
+  recordClaim(canon, false, { adopted: true });
+  console.log(JSON.stringify({ ok: true, id: canon, adopted: true, ref: ref, files: mine }));
+}
+
 function main() {
-  const argv = process.argv.slice(2);
-  const domain = argv[0];
-  if (!domain) fail('도메인을 지정하세요. 예: /task-new core 번호-발급');
-  const slug = argv.slice(1).join(' ').split(' ').filter(Boolean).join('-');
+  // --dry-run : 선점하지 않고 "지금 받으면 나올 번호"와 근거별 최대값만 보여 준다.
+  // --branch <b> : 기준 브랜치를 이번 한 번만 지정한다.
+  // --adopt <번호> : 플러그인 이전부터 쓰던 번호를 ref 로 등록한다.
+  const raw = process.argv.slice(2);
+  const dryRun = raw.indexOf('--dry-run') >= 0;
+  const valueOf = name => { const i = raw.indexOf(name); return (i >= 0 && raw[i + 1]) ? raw[i + 1] : null; };
+  const branchVal = valueOf('--branch');
+  const adoptId = valueOf('--adopt');
+  const branchArgv = branchVal ? ['--branch', branchVal] : [];
+  const skip = new Set();
+  for (const name of ['--branch', '--adopt']) {
+    const i = raw.indexOf(name);
+    if (i >= 0) { skip.add(i); skip.add(i + 1); }
+  }
+  const argv = raw.filter((a, i) => a !== '--dry-run' && !skip.has(i));
 
   const rootRes = gitQuiet(['rev-parse', '--show-toplevel']);
   if (!rootRes.ok) fail('git 저장소가 아닙니다.');
@@ -121,14 +216,23 @@ function main() {
     catch (e) { fail('.task-id.json 을 읽지 못했습니다: ' + e.message); }
   }
 
+  if (adoptId) return adopt(adoptId, cfg, root, branchArgv);
+
+  const domain = argv[0];
+  if (!domain) fail('도메인을 지정하세요. 예: /task-new core 번호-발급');
+  const slug = argv.slice(1).join(' ').split(' ').filter(Boolean).join('-');
+
   const year = new Date().getFullYear();
   const prefix = 'TASK-' + year + '-' + domain + '-';
   const pad = n => String(n).padStart(cfg.digits, '0');
 
-  const used = [];
+  // 근거별로 따로 모은다. 미리보기에서 어느 근거가 번호를 밀어 올렸는지 보여 주려고.
+  const fromTree = [];
+  const fromRefs = [];
+  const fromBase = [];
   const scan = base => {
     const d = path.join(base, cfg.taskDir);
-    if (fs.existsSync(d)) for (const n of numbersInTree(d, prefix)) used.push(n);
+    if (fs.existsSync(d)) for (const n of numbersInTree(d, prefix)) fromTree.push(n);
   };
   scan(root);
   const worktrees = siblingWorktrees(root);
@@ -146,7 +250,7 @@ function main() {
       const at = line.indexOf(prefix);
       if (at < 0) continue;
       const n = numberAfter(line.slice(at), prefix);
-      if (n >= 0) used.push(n);
+      if (n >= 0) fromRefs.push(n);
     }
   } else {
     offline = true;
@@ -170,17 +274,27 @@ function main() {
   // 최종 근거는 이것뿐이다. 못 보면 번호를 주지 않는다 - 겹칠 수 있는 번호를 주느니 멈춘다.
   let base = null;
   if (!offline) {
-    base = committedPaths(cfg, cfg.remote, [], root);
+    base = committedPaths(cfg, cfg.remote, branchArgv, root);
     if (!base.ok) fail(base.error + ' 원격에 이미 커밋된 번호를 확인해야 해서 발급을 멈췄습니다.');
     for (const p of base.paths) {
       const n = numberAfter(path.basename(p), prefix);
-      if (n >= 0) used.push(n);
+      if (n >= 0) fromBase.push(n);
     }
   }
 
-  let n = 0;
-  for (const u of used) if (u > n) n = u;
-  n += 1;
+  const maxOf = arr => arr.reduce((m, x) => (x > m ? x : m), 0);
+  let n = Math.max(maxOf(fromTree), maxOf(fromRefs), maxOf(fromBase)) + 1;
+
+  if (dryRun) {
+    console.log(JSON.stringify({
+      ok: true, dryRun: true, id: prefix + pad(n), domain: domain, year: year,
+      max: { tree: maxOf(fromTree), refs: maxOf(fromRefs), branch: maxOf(fromBase) },
+      scanned: { worktrees: worktrees.length, remote: !offline,
+                 branch: base ? base.branch : null, branchFrom: base ? base.from : null },
+      note: '미리보기라 선점하지 않았습니다. 실제로 받을 때 그 사이 다른 세션이 잡았으면 다음 번호가 나옵니다.',
+    }));
+    return;
+  }
 
   const report = (id, attempts, extra) => {
     recordClaim(id, !!(extra && extra.offline));

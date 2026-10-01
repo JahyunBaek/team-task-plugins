@@ -56,12 +56,18 @@ function alreadyTracked(file, cwd) {
   return gitTry(['ls-files', '--error-unmatch', '--', file], cwd) !== null;
 }
 
+/** 이 저장소에서 발급·등록한 번호. 워크트리끼리 함께 쓰는 자리와, 예전에 쓰던 워크트리별 자리를 함께 본다. */
 function claimedIds(cwd) {
-  try {
-    const dir = git(['rev-parse', '--git-dir'], cwd).trim();
-    const list = JSON.parse(fs.readFileSync(path.resolve(cwd, dir, 'task-id-claims.json'), 'utf8'));
-    return Array.isArray(list) ? list.map(x => x && x.id) : [];
-  } catch (e) { return []; }
+  const ids = [];
+  for (const flag of ['--git-common-dir', '--git-dir']) {
+    const dir = gitTry(['rev-parse', flag], cwd);
+    if (!dir) continue;
+    try {
+      const list = JSON.parse(fs.readFileSync(path.resolve(cwd, dir.trim(), 'task-id-claims.json'), 'utf8'));
+      if (Array.isArray(list)) for (const x of list) if (x && x.id) ids.push(x.id);
+    } catch (e) { /* 기록이 없다 */ }
+  }
+  return ids;
 }
 
 function worktreeRoots(root) {
