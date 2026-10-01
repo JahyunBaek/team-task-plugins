@@ -1,10 +1,17 @@
 #!/usr/bin/env node
 'use strict';
 /**
- * 작업 번호 발급 — 조회가 아니라 예약이다.
+ * 작업 번호 발급 - 목록에서 고르지 않고 원격에서 선점한다.
  *
- * 번호를 고른 뒤 원격에 그 이름으로 표식을 만든다. "없을 때만 만들기"로 밀기 때문에
- * 같은 번호를 동시에 노린 세션 중 하나만 성공한다. 거절받은 쪽은 다음 번호로 넘어간다.
+ * 번호를 고른 뒤 원격에 그 번호 이름으로 ref 를 만든다(refs/task-ids/<번호>).
+ * 깃은 같은 이름의 ref 를 두 번 만들지 못한다. "없을 때만 만들기"로 밀면
+ * 같은 번호를 동시에 노린 세션 중 하나만 성공하고, 거절받은 쪽은 다음 번호로 넘어간다.
+ * 판정을 원격이 하므로 다른 PC 에서 들어온 세션도 같이 걸린다.
+ *
+ * ref 가 가리키는 것은 빈 트리 위의 커밋 하나다. 작업 폴더는 건드리지 않는다.
+ * 메시지에 번호·프로세스·시각·난수를 적어 매번 다른 객체가 되게 한다 -
+ * 같은 객체면 "방금 내가 잡은 것"과 "이미 있던 것"을 구별할 수 없기 때문이다.
+ *
  * 원격을 못 보면 경고를 남기고 로컬 기준으로 발급한다(잠정).
  */
 const { execFileSync } = require('child_process');
@@ -168,7 +175,7 @@ function main() {
     const msg = 'claim ' + id + ' pid=' + process.pid + ' t=' + Date.now() +
                 ' r=' + Math.random().toString(36).slice(2) + '\n';
     const made = gitQuiet(['commit-tree', EMPTY_TREE], { input: msg });
-    if (!made.ok) fail('예약 표식을 만들지 못했습니다: ' + made.out.trim());
+    if (!made.ok) fail('선점용 객체를 만들지 못했습니다: ' + made.out.trim());
     const sha = made.out.trim();
     const push = gitQuiet(['push', '--force-with-lease=' + ref + ':', cfg.remote, sha + ':' + ref], { timeout: 15000 });
     if (push.ok) return report(id, i + 1);
