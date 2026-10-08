@@ -21,10 +21,21 @@
  * 브랜치 하나만 봐서는 소용이 없고, 모든 브랜치를 발급마다 훑기엔 느리다.
  *
  * 원격을 못 보면 멈춘다(기본값). offlinePolicy 가 warn 이면 1·2 만으로 잠정 번호를 준다.
+ *
+ * push 가 실패하면 메시지 글자로 판정하지 않고 원격에 그 ref 를 다시 묻는다(0.2.2).
+ *   내가 민 객체 그대로 있으면 → 잡은 것이다(시간 초과·응답만 끊긴 경우)
+ *   다른 객체가 있으면        → 다른 세션이 먼저 잡았다 → 다음 번호
+ *   없으면                    → 정말 실패
+ * 0.2.1 까지는 시간 초과·연결 끊김을 그대로 「선점 실패」 로 돌려줬다. Windows 에서는 시간 초과로
+ * git.exe 만 죽고 전송하는 자식 프로세스는 살아서 push 를 끝내므로, 원격에는 ref 가 생기고
+ * 발급은 실패로 보고됐다 - 그 번호는 이 PC 기록에 없어 나중에 「다른 세션의 번호」 로 보였다.
+ * 확인까지 못 했으면(원격 조회도 실패·시간 초과 직후 아직 안 보임) 「확인 대기」 로 기록해 두고,
+ * 다음 발급 때 원격에 내 객체가 나타났으면 recovered 로 알린다.
  */
 const fs = require('fs');
 const path = require('path');
 const { execFileSync } = require('child_process');
+const { refOwner } = require('./ref-owner.js');
 
 const EMPTY_TREE = '4b825dc642cb6eb9a060e54bf8d69288fbee4904';
 const DEFAULTS = {
@@ -34,7 +45,10 @@ const DEFAULTS = {
   digits: 4,
   offlinePolicy: 'block',
   maxAttempts: 25,
+  pushTimeoutMs: 60000,
 };
+/** 시간 초과 뒤 원격을 다시 묻는 간격(ms) — 죽은 git 의 자식이 push 를 마저 끝낼 틈 */
+const LATE_CHECKS = [0, 2000, 5000];
 
 function git(args, opts) {
   opts = opts || {};
@@ -47,7 +61,46 @@ function git(args, opts) {
 }
 function gitQuiet(args, opts) {
   try { return { ok: true, out: git(args, opts) }; }
-  catch (e) { return { ok: false, out: String(e.stderr || e.stdout || e.message || '') }; }
+  catch (e) {
+    const timedOut = e.code === 'ETIMEDOUT' || (e.signal != null && e.status == null);
+    return { ok: false, timedOut: timedOut, out: String(e.stderr || e.stdout || e.message || '') };
+  }
+}
+
+function sleep(ms) {
+  Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+}
+
+function lastLine(s) {
+  return String(s || '').split('\n').map(l => l.trim()).filter(Boolean).pop() || '';
+}
+
+/** 원격의 그 ref 가 가리키는 객체. { ok, sha|null } — 원격을 못 보면 ok:false */
+function remoteRefSha(cfg, ref) {
+  const r = gitQuiet(['ls-remote', cfg.remote, ref], { timeout: 15000 });
+  if (!r.ok) return { ok: false, out: r.out };
+  for (const line of r.out.split('\n')) {
+    const at = line.indexOf('\t');
+    if (at > 0 && line.slice(at + 1).trim() === ref) return { ok: true, sha: line.slice(0, at).trim() };
+  }
+  return { ok: true, sha: null };
+}
+
+/**
+ * push 가 실패한 뒤 원격 상태로 판정한다 — 'mine' | 'taken' | 'absent' | 'unknown'(원격도 못 봄).
+ * waits 마다 다시 묻는다. 시간 초과 직후에는 늦게 끝나는 push 를 기다린다.
+ */
+function verifyClaim(cfg, ref, sha, waits) {
+  let reached = false;
+  for (const w of waits) {
+    if (w) sleep(w);
+    const r = remoteRefSha(cfg, ref);
+    if (!r.ok) continue;
+    reached = true;
+    if (r.sha === sha) return 'mine';
+    if (r.sha) return 'taken';
+  }
+  return reached ? 'absent' : 'unknown';
 }
 
 function fail(msg, extra) {
@@ -112,6 +165,16 @@ function recordClaim(id, provisional, extra) {
   list.push(Object.assign({ id: id, at: new Date().toISOString(), provisional: !!provisional }, extra || {}));
   try { fs.writeFileSync(file, JSON.stringify(list, null, 2)); } catch (e) { /* 기록 실패가 발급을 막지는 않는다 */ }
 }
+/** 확인 대기(pending)였던 번호를 확정한다 — 원격에 이 PC 가 민 객체 그대로 있었다 */
+function confirmPending(ids) {
+  const file = claimsFile();
+  if (!file || !ids.length) return;
+  const list = readClaims();
+  for (const c of list) {
+    if (c && c.pending && ids.indexOf(c.id) >= 0) { c.pending = false; c.confirmedAt = new Date().toISOString(); }
+  }
+  try { fs.writeFileSync(file, JSON.stringify(list, null, 2)); } catch (e) { /* 기록 실패가 발급을 막지는 않는다 */ }
+}
 
 /** TASK-<연도>-<도메인>-<번호> 를 뜯는다. 아니면 null. */
 function parseIdStr(id) {
@@ -149,16 +212,32 @@ function adopt(id, cfg, root) {
   const ls = gitQuiet(['ls-remote', cfg.remote, ref, cfg.refNamespace + '/_floor/' + p.prefix + '*'], { timeout: 10000 });
   if (!ls.ok) fail('원격의 ref 를 보지 못했습니다: ' + (ls.out.trim().split('\n').pop() || ''));
   let exists = false;
+  let remoteSha = null;
   let floor = 0;
   for (const line of ls.out.split('\n')) {
     const at = line.indexOf('\t');
     if (at < 0) continue;
     const name = line.slice(at + 1).trim();
-    if (name === ref) exists = true;
+    if (name === ref) { exists = true; remoteSha = line.slice(0, at).trim(); }
     else { const n = numberAfter(name.slice(name.lastIndexOf('/') + 1), p.prefix); if (n > floor) floor = n; }
   }
   if (exists || p.num <= floor) {
-    const ours = readClaims().some(c => c && c.id === canon);
+    const claims = readClaims();
+    // 확인 대기로 남겨 둔 번호가 원격에 이 PC 가 민 그대로 있으면 확정한다
+    const pendingMine = exists && claims.some(c => c && c.id === canon && c.pending && c.sha === remoteSha);
+    if (pendingMine) confirmPending([canon]);
+    const ours = pendingMine || claims.some(c => c && c.id === canon && !c.pending);
+    // 이 PC 기록에는 없지만 원격 ref 를 만든 사람이 지금 git 사용자면 — 발급이 실패로 보고됐던 이 사용자의 번호다
+    if (!ours && exists) {
+      const owner = refOwner(cfg.remote, ref, remoteSha, process.cwd(), 15000);
+      if (owner && owner.mine) {
+        recordClaim(canon, false, { adopted: true, recovered: true, sha: remoteSha });
+        console.log(JSON.stringify({ ok: true, id: canon, adopted: true, recovered: true, ref: ref, files: mine,
+          message: '원격의 이 번호는 이 PC 의 git 사용자(' + owner.email + ')가 잡은 번호라 이 PC 기록에 올렸습니다. ' +
+                   '발급이 실패로 보고됐지만 실제로는 잡혔던 번호입니다.' }));
+        return;
+      }
+    }
     console.log(JSON.stringify({ ok: true, id: canon, adopted: false, files: mine,
       message: ours ? '이미 이 PC 에서 등록한 번호입니다.'
         : '이미 원격에 등록된 번호입니다. 다른 세션이나 PC 가 같은 번호로 다른 문서를 만들었다면 겹친 것이니, ' +
@@ -230,12 +309,15 @@ function main() {
   const ls = gitQuiet(['ls-remote', cfg.remote,
     cfg.refNamespace + '/' + prefix + '*',
     cfg.refNamespace + '/_floor/' + prefix + '*'], { timeout: 10000 });
+  const remoteShas = {};
   if (ls.ok) {
     for (const line of ls.out.split('\n')) {
       const pos = line.indexOf(prefix);
       if (pos < 0) continue;
       const n = numberAfter(line.slice(pos), prefix);
       if (n >= 0) fromRefs.push(n);
+      const at = line.indexOf('\t');
+      if (at > 0) remoteShas[line.slice(at + 1).trim()] = line.slice(0, at).trim();
     }
   } else {
     offline = true;
@@ -268,13 +350,29 @@ function main() {
     return;
   }
 
-  const report = (id, attempts, extra) => {
-    recordClaim(id, !!(extra && extra.offline));
-    console.log(JSON.stringify(Object.assign({
+  // 지난번 「확인 대기」 로 남은 번호가 그 뒤 원격에 이 PC 가 민 그대로 나타났으면 확정하고 알린다
+  const recovered = [];
+  if (!offline) {
+    for (const c of readClaims()) {
+      if (c && c.pending && c.sha && String(c.id).indexOf(prefix) === 0 &&
+          remoteShas[cfg.refNamespace + '/' + c.id] === c.sha) recovered.push(c.id);
+    }
+    confirmPending(recovered);
+  }
+
+  const report = (id, attempts, extra, sha) => {
+    recordClaim(id, !!(extra && extra.offline), sha ? { sha: sha } : undefined);
+    const out = Object.assign({
       ok: true, id: id, attempts: attempts, domain: domain, year: year,
       path: slug ? cfg.taskDir + '/' + domain + '/' + id + '-' + slug + '.md' : null,
       scanned: { worktrees: worktrees.length, remote: !offline },
-    }, extra || {})));
+    }, extra || {});
+    if (recovered.length) {
+      out.recovered = recovered;
+      out.recoveredNote = recovered.join(', ') + ' 는 지난번 발급이 실패로 보고됐지만 원격에 이 PC 가 잡아 둔 번호입니다. ' +
+                          '쓰지 않으면 빈 번호로 남습니다.';
+    }
+    console.log(JSON.stringify(out));
   };
 
   if (offline) {
@@ -293,15 +391,37 @@ function main() {
     const made = gitQuiet(['commit-tree', EMPTY_TREE], { input: msg });
     if (!made.ok) fail('선점용 객체를 만들지 못했습니다: ' + made.out.trim());
     const sha = made.out.trim();
-    const push = gitQuiet(['push', '--force-with-lease=' + ref + ':', cfg.remote, sha + ':' + ref], { timeout: 15000 });
-    if (push.ok) return report(id, i + 1);
+    const push = gitQuiet(['push', '--force-with-lease=' + ref + ':', cfg.remote, sha + ':' + ref],
+                          { timeout: cfg.pushTimeoutMs });
+    if (push.ok) return report(id, i + 1, null, sha);
+
+    // 판정은 원격 상태로 — 메시지 글자는 시간 초과·응답 끊김·훅 거절에 따라 달라진다.
+    // 거절 문구가 분명하면 한 번만 묻고, 아니면(시간 초과·연결 끊김) 늦게 끝나는 push 를 기다리며 다시 묻는다.
     const why = push.out.toLowerCase();
-    const taken = why.indexOf('rejected') >= 0 || why.indexOf('stale info') >= 0 ||
-                  why.indexOf('already exists') >= 0 || why.indexOf('non-fast-forward') >= 0;
-    if (!taken) {
-      const lines = push.out.split('\n').filter(Boolean);
-      fail('선점에 실패했습니다: ' + (lines.length ? lines[lines.length - 1].trim() : ''), { id: id });
+    const looksTaken = why.indexOf('rejected') >= 0 || why.indexOf('stale info') >= 0 ||
+                       why.indexOf('already exists') >= 0 || why.indexOf('non-fast-forward') >= 0;
+    const state = verifyClaim(cfg, ref, sha, (push.timedOut || !looksTaken) ? LATE_CHECKS : [0]);
+    if (state === 'mine') {
+      return report(id, i + 1, {
+        verified: true,
+        note: 'push 가 ' + (push.timedOut ? '시간 초과' : '오류(' + lastLine(push.out) + ')') +
+              '로 끝났지만 원격에 이 PC 가 민 그대로 잡혀 있어 발급했습니다.',
+      }, sha);
     }
+    if (state === 'taken') continue;
+
+    const reason = push.timedOut
+      ? 'push 가 ' + Math.round(cfg.pushTimeoutMs / 1000) + '초 안에 끝나지 않았습니다'
+      : (lastLine(push.out) || 'push 실패');
+    if (state === 'unknown' || push.timedOut) {
+      // 늦게라도 원격에 잡힐 수 있다 — 기록해 두면 다음 발급·훅·--adopt 가 이 PC 의 번호로 알아본다
+      recordClaim(id, false, { pending: true, sha: sha });
+      fail('선점에 실패했습니다: ' + reason + '. 원격에 이 번호가 잡혔는지 ' +
+           (state === 'unknown' ? '확인하지 못했습니다(원격 조회도 실패)' : '아직 보이지 않습니다') + '. ' +
+           '「확인 대기」 로 기록해 두었습니다 — 이 번호로 파일을 만들지 말고, 다시 부르면 새 번호와 함께 이 번호가 원격에 나타났는지 알려 줍니다.',
+           { id: id, pending: true });
+    }
+    fail('선점에 실패했습니다: ' + reason + ' (원격에 이 번호는 만들어지지 않았습니다)', { id: id });
   }
   fail(cfg.maxAttempts + '번 시도했지만 번호를 잡지 못했습니다. 동시에 너무 많이 발급 중입니다.');
 }
